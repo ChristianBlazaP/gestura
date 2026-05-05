@@ -1,0 +1,18 @@
+{
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.14"
+  },
+  "dependencies": {
+    "@mediapipe/camera_utils": "^0.3.1675466862",
+    "@mediapipe/hands": "^0.4.1675469240",
+    "@tensorflow-models/hand-pose-detection": "^2.0.1",
+    "@tensorflow-models/knn-classifier": "^1.2.6",
+    "@tensorflow/tfjs": "^4.22.0",
+    "axios": "^1.12.2",
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
+    "express": "^5.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "mysql": "^2.18.1"
+  }
+}
