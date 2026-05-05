@@ -3426,9 +3426,9 @@ export default function InterpreterPage() {
       {/* Main grid */}
       <main className="fade-up flex-1 max-w-[1400px] w-full mx-auto flex flex-col gap-4 px-2 sm:px-4 lg:px-6 py-4">
         {/* TOP: YOU / PARTNER / CHAT */}
-        <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 auto-rows-[1fr] min-h-[280px] xl:min-h-[320px]">
+        <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {/* YOU */}
-          <div className="surface-card-strong overflow-hidden flex flex-col h-full">
+          <div className="surface-card-strong flex flex-col overflow-visible">
             <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/70">
               <h2 className="text-base font-semibold">YOU</h2>
               <p className="text-xs text-slate-300">
@@ -3436,7 +3436,7 @@ export default function InterpreterPage() {
               </p>
             </div>
 
-            <div className="flex-1 relative bg-slate-950/60 overflow-hidden">
+            <div className="relative bg-slate-950/60 w-full h-48 sm:h-56 overflow-hidden flex-shrink-0">
               <video
                 ref={localVideoRef}
                 autoPlay
@@ -3453,7 +3453,7 @@ export default function InterpreterPage() {
               />
             </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3 border-t border-slate-700/70 bg-slate-950/50">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3 border-t border-slate-700/70 bg-slate-950/50 flex-shrink-0">
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                 <button
                   onClick={startCamera}
@@ -3501,7 +3501,7 @@ export default function InterpreterPage() {
           </div>
 
           {/* PARTNER */}
-          <div className="surface-card-strong overflow-hidden flex flex-col h-full">
+          <div className="surface-card-strong flex flex-col overflow-visible">
             <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/70">
               <h2 className="text-base font-semibold">PARTNER</h2>
               <p className="text-xs text-slate-300">
@@ -3509,7 +3509,7 @@ export default function InterpreterPage() {
               </p>
             </div>
 
-            <div className="flex-1 relative bg-slate-950/60 overflow-hidden">
+            <div className="relative bg-slate-950/60 w-full h-48 sm:h-56 overflow-hidden flex-shrink-0">
               <video
                 ref={remoteVideoRef}
                 autoPlay
@@ -3524,12 +3524,12 @@ export default function InterpreterPage() {
               )}
             </div>
 
-            <div className="px-4 py-3 border-t border-slate-700/70 bg-slate-950/50 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-1">
+            <div className="px-4 py-3 border-t border-slate-700/70 bg-slate-950/50 flex flex-col gap-3 flex-shrink-0">
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                 <button
                   onClick={handleCreateRoom}
                   disabled={roomJoined}
-                  className="btn-primary px-3 py-2 text-sm rounded disabled:opacity-60 flex-1 sm:flex-auto"
+                  className="btn-primary px-3 py-2 text-sm rounded disabled:opacity-60 w-full sm:w-auto"
                 >
                   Create
                 </button>
@@ -3538,35 +3538,37 @@ export default function InterpreterPage() {
                   value={roomCode}
                   onChange={(e) => setRoomCode(e.target.value)}
                   placeholder="Room code"
-                  className="bg-transparent border border-white/10 rounded px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-300"
+                  className="flex-1 min-w-0 bg-transparent border border-white/10 rounded px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-300"
                 />
                 <button
                   onClick={copyRoomCode}
                   disabled={!roomCode.trim()}
                   title="Copy room code"
-                  className="btn-secondary px-2 py-2 text-sm rounded disabled:opacity-60"
+                  className="btn-secondary px-2 py-2 text-sm rounded disabled:opacity-60 w-full sm:w-auto"
                 >
                   Copy
                 </button>
                 {copyMsg && (
-                  <span className="text-sm text-emerald-300 px-1 text-center">{copyMsg}</span>
+                  <span className="text-sm text-emerald-300 px-1 text-center whitespace-nowrap">{copyMsg}</span>
                 )}
               </div>
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <button
-                  onClick={() => handleJoinRoom()}
-                  disabled={roomJoined}
-                  className="btn-secondary px-3 py-2 text-sm rounded disabled:opacity-60 flex-1 sm:flex-auto"
-                >
-                  Join
-                </button>
-                <button
-                  onClick={handleLeaveRoom}
-                  disabled={!roomJoined}
-                  className="btn-ghost px-3 py-2 text-sm rounded disabled:opacity-60 flex-1 sm:flex-auto"
-                >
-                  Leave
-                </button>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-2 justify-between">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-1">
+                  <button
+                    onClick={() => handleJoinRoom()}
+                    disabled={roomJoined}
+                    className="btn-secondary px-3 py-2 text-sm rounded disabled:opacity-60"
+                  >
+                    Join
+                  </button>
+                  <button
+                    onClick={handleLeaveRoom}
+                    disabled={!roomJoined}
+                    className="btn-ghost px-3 py-2 text-sm rounded disabled:opacity-60"
+                  >
+                    Leave
+                  </button>
+                </div>
                 <p className="text-sm text-slate-300 text-center sm:text-right">
                   Status: {roomJoined ? "In room" : "Idle"}
                 </p>
@@ -3575,7 +3577,7 @@ export default function InterpreterPage() {
           </div>
 
           {/* CHAT */}
-          <div className="surface-card-strong overflow-hidden flex flex-col h-full">
+          <div className="surface-card-strong flex flex-col overflow-visible">
             <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/70">
               <h2 className="text-base font-semibold">Chat</h2>
               <span className="text-xs text-slate-300">
@@ -3583,7 +3585,7 @@ export default function InterpreterPage() {
               </span>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2 text-sm max-h-[200px]">
+            <div className="overflow-y-auto px-4 py-3 space-y-2 text-sm h-48 sm:h-56">
               {chatMessages.length === 0 && (
                 <p className="text-slate-300">No messages yet.</p>
               )}
@@ -3610,18 +3612,18 @@ export default function InterpreterPage() {
 
             <form
               onSubmit={handleSendChat}
-              className="px-2 py-2 border-t border-slate-700/70 bg-slate-950/50 flex items-center gap-1.5"
+              className="px-3 py-3 border-t border-slate-700/70 bg-slate-950/50 flex flex-col gap-2 flex-shrink-0"
             >
               <input
                 type="text"
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 placeholder="Type a message..."
-                className="flex-1 bg-transparent border border-white/10 rounded px-2 py-1.5 text-xs text-slate-100 placeholder:text-slate-300"
+                className="w-full bg-transparent border border-white/10 rounded px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-300"
               />
               <button
                 type="submit"
-                className="btn-primary px-3 py-1.5 text-xs rounded"
+                className="btn-primary px-4 py-1.5 text-sm rounded w-full"
               >
                 Send
               </button>
