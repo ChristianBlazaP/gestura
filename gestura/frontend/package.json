@@ -1,0 +1,29 @@
+{
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.4",
+    "autoprefixer": "^10.4.21",
+    "baseline-browser-mapping": "^2.9.2",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.14",
+    "vite": "^7.1.9"
+  },
+  "scripts": {
+    "dev": "vite --config vite.config.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "signal": "node signaling-server.js"
+  },
+  "dependencies": {
+    "@mediapipe/camera_utils": "^0.3.1675466862",
+    "@mediapipe/hands": "^0.4.1675469240",
+    "@mediapipe/tasks-vision": "^0.10.22-rc.20250304",
+    "@tensorflow-models/knn-classifier": "^1.2.6",
+    "@tensorflow/tfjs-backend-webgl": "^4.22.0",
+    "@tensorflow/tfjs-converter": "^4.22.0",
+    "axios": "^1.13.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.9.5",
+    "ws": "^8.18.3"
+  }
+}
