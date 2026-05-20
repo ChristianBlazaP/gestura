@@ -16,8 +16,8 @@ let globalHandInitPromise = null;
 const NO_DETECT_SPEAK_MS = 850; // faster phrase speak after ~0.85s of no hand
 const STABLE_MS_PER_LETTER = 1500; // confirm after 1.5s of stable hold
 const MIN_HAND_SCORE = 0.35;  // Reduced for better palm detection
-const MIN_HAND_SPAN = 0.09;   // Reduced for better palm detection
-const MIN_HAND_AREA = 0.009;  // Reduced for better palm detection
+const MIN_HAND_SPAN = 0.04;   // Ultra-lenient for extreme hand tilts/rotations during fast drawing motion
+const MIN_HAND_AREA = 0.001;  // Ultra-lenient for extreme hand tilts/rotations during fast drawing motion
 const PREDICT_INTERVAL_MS = 900;
 const PREDICT_INTERVAL_STABLE_MS = 900;
 const PREDICT_BACKOFF_MS = 2500;
@@ -49,6 +49,11 @@ const BACKEND_MIN_STABILITY = 0.3;  // Reduced for better palm tracking
 const BACKEND_MIN_PRESENCE = 0.2;   // Reduced for better palm detection
 const MIRROR_LEFT_HAND = true;
 const DYNAMIC_LABELS = new Set(["J", "Z"]);
+const DYNAMIC_TRAIL_MAX = 72;
+const DYNAMIC_MOTION_HISTORY_MAX = 28;
+const DYNAMIC_CONFIRM_HOLD_MS = 450;
+const PINKY_TIP_IDX = 20;
+const INDEX_TIP_IDX = 8;
 const NON_LETTER_LABELS = new Set(["del", "nothing"]);
 const STATIC_LABEL_SET = FULL_LABEL_SET.filter(
   (label) => !DYNAMIC_LABELS.has(label) && !NON_LETTER_LABELS.has(label)
@@ -214,9 +219,9 @@ async function getHandLandmarker() {
         },
         runningMode: "VIDEO",
         numHands: 1,
-        minHandDetectionConfidence: 0.55,  // Reduced for better palm detection sensitivity
-        minHandPresenceConfidence: 0.55,   // Reduced for better palm detection sensitivity
-        minTrackingConfidence: 0.65,       // Slightly reduced for stable tracking
+        minHandDetectionConfidence: 0.35,  // Extremely sensitive palm/hand detector for fast motions
+        minHandPresenceConfidence: 0.35,   // Extremely sensitive palm/hand presence tracker
+        minTrackingConfidence: 0.35,       // High precision tracking that doesn't drop at extreme tilt angles
       });
 
     globalHandLandmarker = handLandmarker;
@@ -248,6 +253,9 @@ export default function InterpreterPage() {
   const [letterSequence, setLetterSequence] = useState([]);
 
   const [autoSpeak, setAutoSpeak] = useState(true);
+  const dynamicModeRef = useRef(false);
+  const dynamicStrokeRef = useRef({ finger: null, path: [] });
+  const motionTrailRef = useRef([]);
   const showLandmarks = true;
   const autoSpeakRef = useRef(true);
   const [tfModel, setTfModel] = useState(null);
@@ -557,17 +565,92 @@ export default function InterpreterPage() {
     }
   }
 
-  // Handle spacebar press for adding spaces
+  function beginDynamicStroke() {
+    dynamicStrokeRef.current = { finger: null, path: [] };
+    motionTrailRef.current = [];
+    motionHistoryRef.current = [];
+    modelPredRef.current = { label: "", conf: 0, ts: 0 };
+    modelHistoryRef.current = [];
+    candidateRef.current = { letter: "", startedAt: 0, lastSeenAt: 0 };
+  }
+
+  function finalizeDynamicStroke() {
+    const { finger, path } = dynamicStrokeRef.current;
+    let letter = "";
+    if (path.length >= 5) {  // More lenient: reduced from 8 to 5 for shorter J strokes
+      if (finger === "J") letter = detectJFromPath(path) ? "J" : "";
+      else if (finger === "Z") letter = detectZFromPath(path) ? "Z" : "";
+      else if (detectJFromPath(path)) letter = "J";
+      else if (detectZFromPath(path)) letter = "Z";
+    }
+    dynamicStrokeRef.current = { finger: null, path: [] };
+    motionTrailRef.current = [];
+    motionHistoryRef.current = [];
+
+    if (letter) {
+      skipSpeakRef.current = false;
+      confirmStableLetter(letter);
+      setConfirmedLetter(letter);
+      setLocalLabel(`Letter: ${letter}`);
+      sendLiveLabel(`Letter: ${letter}`);
+      setDetectionConfidence(92);
+      return;
+    }
+    setLocalLabel("No J/Z motion detected — hold Ctrl and draw again");
+    sendLiveLabel("No J/Z motion detected");
+  }
+
+  function setDynamicModeActive(active) {
+    if (active === dynamicModeRef.current) return;
+    dynamicModeRef.current = active;
+    if (active) beginDynamicStroke();
+    else finalizeDynamicStroke();
+  }
+
+  function isLetterAllowed(letter) {
+    if (!letter) return false;
+    if (DYNAMIC_LABELS.has(letter)) return true;
+    return allowedLetters.current.has(letter);
+  }
+
+  // Spacebar = word space; hold Ctrl = dynamic J/Z motion mode
   useEffect(() => {
+    const isTypingTarget = (el) => {
+      if (!el) return false;
+      const tag = el.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || el.isContentEditable;
+    };
+
     const handleKeyDown = (e) => {
-      if (e.code === "Space" && isCameraOn && e.target === document.body) {
+      if (isTypingTarget(e.target)) return;
+      if (e.code === "Space" && isCameraOn) {
         e.preventDefault();
         addSpace();
+        return;
+      }
+      if (e.code === "ControlLeft" || e.code === "ControlRight") {
+        if (e.repeat || !isCameraOn) return;
+        e.preventDefault();
+        setDynamicModeActive(true);
       }
     };
 
+    const handleKeyUp = (e) => {
+      if (e.code === "ControlLeft" || e.code === "ControlRight") {
+        setDynamicModeActive(false);
+      }
+    };
+
+    const handleBlur = () => setDynamicModeActive(false);
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    window.addEventListener("blur", handleBlur);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+      window.removeEventListener("blur", handleBlur);
+    };
   }, [letterSequence, isCameraOn]);
 
   // ---------------- CAMERA ----------------
@@ -895,13 +978,24 @@ export default function InterpreterPage() {
       });
     });
     const avgMove = count ? totalMove / count : 0;
-    // More responsive to hand movement for better palm tracking
-    if (avgMove > 0.08) {
-      smoothedHandsRef.current = hands;
-      return hands;
+    
+    // Smoothly scale alpha based on movement speed to prevent sudden jitter/lag jumps (One Euro Filter style)
+    let alpha = 0.5;
+    if (dynamicModeRef.current) {
+      // In dynamic drawing mode, we want extreme smoothness at slow speeds (alpha = 0.85)
+      // and high precision/responsiveness at fast speeds (alpha = 0.40).
+      // Normalize speed up to 0.20 for smooth interpolation.
+      const speedFactor = clamp01(avgMove / 0.20);
+      alpha = 0.85 - speedFactor * 0.45;
+    } else {
+      // Standard static mode: no smoothing if hand is moving fast to keep it responsive
+      if (avgMove > 0.08) {
+        smoothedHandsRef.current = hands;
+        return hands;
+      }
+      alpha = 0.5;
     }
-    // Lighter smoothing to maintain palm accuracy
-    const alpha = 0.5;
+    
     const smoothed = hands.map((hand, handIndex) => {
       const prevHand = prev[handIndex];
       if (!prevHand || prevHand.length !== hand.length) return hand;
@@ -923,17 +1017,21 @@ export default function InterpreterPage() {
 
   function stabilizeHands(hands, ok) {
     const now = Date.now();
-    if (!hands || !hands.length) {
-      lastGoodHandsRef.current = { hands: null, ts: 0 };
-      return [];
-    }
-    if (ok && hands.length) {
+    const last = lastGoodHandsRef.current;
+    
+    if (hands && hands.length && ok) {
       lastGoodHandsRef.current = { hands, ts: now };
       return hands;
     }
-    const last = lastGoodHandsRef.current;
-    if (last.hands && now - last.ts < 200) {
+    
+    // If MediaPipe lost detection or pose is invalid, hold the last known good hand for up to 350ms to prevent dropouts
+    if (last.hands && now - last.ts < 350) {
       return last.hands;
+    }
+    
+    if (!hands || !hands.length) {
+      lastGoodHandsRef.current = { hands: null, ts: 0 };
+      return [];
     }
     return hands;
   }
@@ -980,6 +1078,22 @@ export default function InterpreterPage() {
     const boneDist = getDistance(p, m);
     const bent = angle < 2.35;
     const tucked = curlDist < boneDist * 0.9;
+    return bent || tucked;
+  }
+
+  // Extremely loose curled check for the active finger in dynamic mode to allow tilting/curving
+  function isFingerFullyCurled(hand, tipIndex, pipIndex, mcpIndex) {
+    const t = hand[tipIndex];
+    const p = hand[pipIndex];
+    const m = hand[mcpIndex];
+    if (!t || !p || !m) return true; // Treat as curled if missing
+
+    const angle = getAngle(m, p, t);
+    const curlDist = getDistance(t, m);
+    const boneDist = getDistance(p, m);
+    // Relaxed thresholds: only considered fully curled if tucked/bent tight into a fist knuckle
+    const bent = angle < 1.7; // ~97 degrees, allowing extreme bends/tilts
+    const tucked = curlDist < boneDist * 0.58;
     return bent || tucked;
   }
 
@@ -1269,85 +1383,231 @@ export default function InterpreterPage() {
     return spread;
   }
 
-  // Detect dynamic J: Index finger pointing + downward curved motion
-  function detectJMotion(hand) {
-    if (!hand || hand.length < 21) return false;
-    const indexExt = isFingerExtended(hand, 8, 6, 5);
-    const middleExt = isFingerExtended(hand, 12, 10, 9);
-    const ringExt = isFingerExtended(hand, 16, 14, 13);
-    const pinkyExt = isFingerExtended(hand, 20, 18, 17);
-    const thumbExt = isThumbExtended(hand);
-    
-    // J pose: only index extended, others curled
-    const jPose = indexExt && !middleExt && !ringExt && !pinkyExt && thumbExt;
-    if (!jPose) return false;
-
-    // Check motion: index tip should move downward and curve
-    if (motionHistoryRef.current.length < 5) {
-      motionHistoryRef.current.push(hand);
-      return false;
+  function segmentDelta(points, startIdx, endIdx) {
+    if (!points.length || endIdx <= startIdx) return null;
+    let dx = 0;
+    let dy = 0;
+    for (let i = startIdx + 1; i <= endIdx; i++) {
+      dx += points[i].x - points[i - 1].x;
+      dy += points[i].y - points[i - 1].y;
     }
-
-    const indexTip = hand[8];
-    const oldHand = motionHistoryRef.current[0];
-    const oldIndexTip = oldHand?.[8];
-    
-    if (!indexTip || !oldIndexTip) return false;
-
-    // Motion should be downward (y increases)
-    const verticalMotion = indexTip.y - oldIndexTip.y;
-    const horizontalMotion = Math.abs(indexTip.x - oldIndexTip.x);
-    
-    // J is downward curve: mostly vertical, small horizontal
-    return verticalMotion > 0.05 && horizontalMotion < verticalMotion * 0.5;
+    return { dx, dy, mag: Math.hypot(dx, dy) };
   }
 
-  // Detect dynamic Z: Zig-zag motion right-down-left
-  function detectZMotion(hand) {
+  function isMostlyHorizontal(dx, dy, minMag = 0.018) {
+    const mag = Math.hypot(dx, dy);
+    return mag >= minMag && Math.abs(dx) > Math.abs(dy) * 1.25;
+  }
+
+  function isMostlyDownward(dx, dy, minMag = 0.02) {
+    const mag = Math.hypot(dx, dy);
+    return mag >= minMag && dy > 0 && dy > Math.abs(dx) * 1.05;
+  }
+
+  function isDiagonalDown(dx, dy, minMag = 0.02) {
+    const mag = Math.hypot(dx, dy);
+    return mag >= minMag && dy > 0.01 && Math.abs(dx) > 0.01 && dy > mag * 0.35;
+  }
+
+  // ASL "I" handshape: pinky up, other fingers folded (for dynamic J)
+  // ASL "I" handshape: pinky extended, other fingers folded (for dynamic J)
+  // More flexible version to detect any J-drawing hand shape
+  function isJPose(hand) {
+    if (!hand || hand.length < 21) return false;
+    // Main requirement: pinky is extended or at least not fully curled
+    const pinkyExtended = isFingerExtended(hand, 20, 18, 17) || !isFingerFullyCurled(hand, 20, 18, 17);
+    const indexOff = !isFingerExtendedLoose(hand, 8, 6, 5);
+    const middleOff = !isFingerExtendedLoose(hand, 12, 10, 9);
+    const ringOff = !isFingerExtendedLoose(hand, 16, 14, 13);
+    return pinkyExtended && indexOff && middleOff && ringOff;
+  }
+
+  // Loose ASL "I" handshape check - very lenient for drawing dynamic J
+  // Allows for various hand positions and extreme tilts while drawing
+  function isJPoseLoose(hand) {
+    if (!hand || hand.length < 21) return false;
+    // When actively drawing J, the little finger moves/curves dynamically.
+    // We only require that the pinky is NOT fully curled and other major fingers are not extended.
+    const pinkyNotFullyCurled = !isFingerFullyCurled(hand, 20, 18, 17);
+    const indexNotTooExtended = !isFingerExtended(hand, 8, 6, 5);
+    const middleNotTooExtended = !isFingerExtended(hand, 12, 10, 9);
+    const ringNotTooExtended = !isFingerExtended(hand, 16, 14, 13);
+    
+    // For maximum flexibility, only require pinky not fully curled + at least 2 other fingers folded
+    return pinkyNotFullyCurled && (indexNotTooExtended || middleNotTooExtended || ringNotTooExtended);
+  }
+
+  // Index pointing, others folded (for dynamic Z)
+  function isZPose(hand) {
     if (!hand || hand.length < 21) return false;
     const indexExt = isFingerExtended(hand, 8, 6, 5);
-    const thumbExt = isThumbExtended(hand);
-    const middleExt = isFingerExtended(hand, 12, 10, 9);
-    const ringExt = isFingerExtended(hand, 16, 14, 13);
-    const pinkyExt = isFingerExtended(hand, 20, 18, 17);
+    const middleOff = !isFingerExtendedLoose(hand, 12, 10, 9);
+    const ringOff = !isFingerExtendedLoose(hand, 16, 14, 13);
+    const pinkyOff = !isFingerExtendedLoose(hand, 20, 18, 17);
+    return indexExt && middleOff && ringOff && pinkyOff;
+  }
+
+  // Loose Index pointing check to keep drawing smoothly even with minor hand motion variations
+  function isZPoseLoose(hand) {
+    if (!hand || hand.length < 21) return false;
+    // When actively drawing, the index finger moves/tilts dynamically.
+    // We only require that the index finger is NOT fully curled, allowing extreme tilts.
+    const indexNotCurled = !isFingerFullyCurled(hand, 8, 6, 5);
+    const middleOff = !isFingerExtendedLoose(hand, 12, 10, 9);
+    const ringOff = !isFingerExtendedLoose(hand, 16, 14, 13);
+    const pinkyOff = !isFingerExtendedLoose(hand, 20, 18, 17);
+    return indexNotCurled && middleOff && ringOff && pinkyOff;
+  }
+
+  function detectJFromPath(path) {
+    if (!path || path.length < 5) return false; // More lenient: require only 5+ points
+
+    // Find the lowest point (bottom of the J)
+    let lowestIdx = 0;
+    for (let i = 1; i < path.length; i++) {
+      if (path[i].y > path[lowestIdx].y) lowestIdx = i;
+    }
+    if (lowestIdx < 1 || lowestIdx > path.length - 2) return false; // More lenient bounds
+
+    // Check basic J characteristics: starts somewhere, goes down, potentially curves
+    const startPoint = path[0];
+    const endPoint = path[path.length - 1];
+    const lowestPoint = path[lowestIdx];
+
+    // Basic requirement: overall downward motion
+    const overallVerticalDist = lowestPoint.y - startPoint.y;
+    const overallHorizontalDist = Math.abs(endPoint.x - startPoint.x);
     
-    // Z pose: index and middle extended, others curled
-    const zPose = indexExt && middleExt && !ringExt && !pinkyExt && !thumbExt;
-    if (!zPose) return false;
+    if (overallVerticalDist < 0.015) return false; // Must have some downward motion
 
-    // Need at least 8 frames to detect zig-zag pattern
-    if (motionHistoryRef.current.length < 8) {
-      motionHistoryRef.current.push(hand);
-      return false;
+    // Strategy 1: Classic J pattern - down then hook left
+    const downSeg = segmentDelta(path, 0, lowestIdx);
+    const hookSeg = segmentDelta(path, lowestIdx, path.length - 1);
+    
+    if (downSeg && hookSeg) {
+      // More lenient thresholds for classic J
+      const hasDownStroke = downSeg.dy > 0.01 && downSeg.dy > Math.abs(downSeg.dx) * 0.8;
+      const hasHookLeft = hookSeg.dx < -0.005 && hookSeg.mag > 0.008; // More lenient hook detection
+      
+      if (hasDownStroke && hasHookLeft) return true;
     }
 
-    const indexTip = hand[8];
-    if (!indexTip) return false;
+    // Strategy 2: Simple curved J - downward motion with any hook/curve at end
+    const firstHalf = segmentDelta(path, 0, Math.floor(path.length / 2));
+    if (firstHalf && firstHalf.dy > 0.012) {
+      // If first half goes down significantly, likely a J
+      return true;
+    }
 
-    // Analyze motion pattern: should have direction changes (zig-zag)
-    let directionChanges = 0;
-    let prevDx = 0;
-    let prevDy = 0;
-
-    for (let i = 1; i < Math.min(motionHistoryRef.current.length, 8); i++) {
-      const curr = motionHistoryRef.current[i]?.[8];
-      const prev = motionHistoryRef.current[i - 1]?.[8];
-      if (!curr || !prev) continue;
-
-      const dx = curr.x - prev.x;
-      const dy = curr.y - prev.y;
-
-      // Check if direction changed (sign flip)
-      if ((prevDx > 0 && dx < -0.01) || (prevDx < -0.01 && dx > 0)) {
-        directionChanges++;
+    // Strategy 3: Any significant downward path is treated as J
+    // (flexible for various drawing styles)
+    if (overallVerticalDist > 0.02) {
+      // Count how many points go downward (lenient interpretation)
+      let downwardCount = 0;
+      for (let i = 1; i < path.length; i++) {
+        if (path[i].y >= path[i - 1].y) downwardCount++;
       }
-
-      prevDx = dx;
-      prevDy = dy;
+      // If majority of movement is downward, it's likely a J
+      if (downwardCount > path.length * 0.5) return true;
     }
 
-    // Z pattern should have 2+ direction changes
-    return directionChanges >= 2;
+    return false;
+  }
+
+  function detectZFromPath(path) {
+    if (!path || path.length < 10) return false;
+
+    const splitA = Math.max(2, Math.floor(path.length * 0.33));
+    const splitB = Math.min(path.length - 3, Math.floor(path.length * 0.66));
+    const seg1 = segmentDelta(path, 0, splitA);
+    const seg2 = segmentDelta(path, splitA, splitB);
+    const seg3 = segmentDelta(path, splitB, path.length - 1);
+    if (!seg1 || !seg2 || !seg3) return false;
+
+    const topLine = isMostlyHorizontal(seg1.dx, seg1.dy);
+    const bottomLine = isMostlyHorizontal(seg3.dx, seg3.dy);
+    const diagonal = isDiagonalDown(seg2.dx, seg2.dy);
+    const horizSameDir =
+      Math.sign(seg1.dx || 0) === Math.sign(seg3.dx || 0) ||
+      (Math.abs(seg1.dx) < 0.008 && Math.abs(seg3.dx) < 0.008);
+
+    return topLine && diagonal && bottomLine && horizSameDir;
+  }
+
+  function recordDynamicStrokeFrame(hand, mapPoint) {
+    const stroke = dynamicStrokeRef.current;
+    if (!stroke.finger) {
+      if (isJPose(hand)) stroke.finger = "J";
+      else if (isZPose(hand)) stroke.finger = "Z";
+      else return;
+    }
+
+    // Auto-correct finger lock in the first few frames of drawing if the opposite pose is clearly active.
+    // This prevents wrong-finger tracking if the user pressed Ctrl slightly early during hand shape transition.
+    if (stroke.finger && stroke.path.length < 8) {
+      const isIndexActive = isFingerExtendedLoose(hand, 8, 6, 5) && !isFingerExtendedLoose(hand, 20, 18, 17);
+      const isPinkyActive = isFingerExtendedLoose(hand, 20, 18, 17) && !isFingerExtendedLoose(hand, 8, 6, 5);
+
+      if (stroke.finger === "J" && isIndexActive) {
+        stroke.finger = "Z";
+        stroke.path = []; // Reset mixed path data
+        motionTrailRef.current = [];
+      } else if (stroke.finger === "Z" && isPinkyActive) {
+        stroke.finger = "J";
+        stroke.path = []; // Reset mixed path data
+        motionTrailRef.current = [];
+      }
+    }
+
+    // Strictly ensure drawing only occurs when the correct pose is active
+    if (stroke.finger === "J" && !isJPoseLoose(hand)) return;
+    if (stroke.finger === "Z" && !isZPoseLoose(hand)) return;
+
+    const tipIdx = stroke.finger === "J" ? PINKY_TIP_IDX : INDEX_TIP_IDX;
+    const tip = hand[tipIdx];
+    if (!tip) return;
+
+    const norm = { x: tip.x, y: tip.y };
+    const lastNorm = stroke.path[stroke.path.length - 1];
+    if (!lastNorm || Math.hypot(norm.x - lastNorm.x, norm.y - lastNorm.y) > 0.008) {
+      stroke.path.push(norm);
+      if (stroke.path.length > DYNAMIC_MOTION_HISTORY_MAX) stroke.path.shift();
+    }
+
+    const displayTip = mapPoint(tip);
+    const trail = motionTrailRef.current;
+    const lastDisplay = trail[trail.length - 1];
+    if (!lastDisplay || Math.hypot(displayTip.x - lastDisplay.x, displayTip.y - lastDisplay.y) > 3) {
+      trail.push(displayTip);
+      if (trail.length > DYNAMIC_TRAIL_MAX) trail.shift();
+    }
+  }
+
+  function drawFingerChainOnly(ctx, hand, finger, mapPoint) {
+    // Only detect/draw the joints of the active finger (pinky for J, index for Z) and do not connect to the wrist.
+    const chain = finger === "J" ? [17, 18, 19, 20] : [5, 6, 7, 8];
+    const color = finger === "J" ? "rgba(251, 191, 36, 0.95)" : "rgba(96, 165, 250, 0.95)";
+
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    chain.forEach((idx, i) => {
+      const p = hand[idx];
+      if (!p) return;
+      const { x, y } = mapPoint(p);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    chain.forEach((idx) => {
+      const p = hand[idx];
+      if (!p) return;
+      const { x, y } = mapPoint(p);
+      ctx.beginPath();
+      ctx.arc(x, y, idx === chain[chain.length - 1] ? 5 : 4, 0, Math.PI * 2);
+      ctx.fill();
+    });
   }
 
   function isStrongO(hand) {
@@ -2448,10 +2708,10 @@ export default function InterpreterPage() {
     const hasStream = !!video.srcObject;
     const vw = video.videoWidth || 640;
     const vh = video.videoHeight || 480;
-    const rect = video.getBoundingClientRect();
-    const canvasRect = canvas.getBoundingClientRect();
-    const displayW = rect.width || canvasRect.width || video.clientWidth || vw;
-    const displayH = rect.height || canvasRect.height || video.clientHeight || vh;
+    const container = video.parentElement;
+    const rect = (container || video).getBoundingClientRect();
+    const displayW = rect.width || video.clientWidth || vw;
+    const displayH = rect.height || video.clientHeight || vh;
     if (!displayW || !displayH) return;
     const dpr = (typeof window !== "undefined" && window.devicePixelRatio) || 1;
     const canvasW = Math.max(1, Math.round(displayW * dpr));
@@ -2461,7 +2721,8 @@ export default function InterpreterPage() {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, displayW, displayH);
 
-    const scale = Math.min(displayW / vw, displayH / vh);
+    // Match CSS object-cover on the <video> (not object-contain)
+    const scale = Math.max(displayW / vw, displayH / vh);
     const renderW = vw * scale;
     const renderH = vh * scale;
     const offsetX = (displayW - renderW) / 2;
@@ -2530,16 +2791,19 @@ export default function InterpreterPage() {
       }
     }
 
-    const mirrorX = true;
+    // Video uses scaleX(-1); landmarks are in raw frame coords → mirror X for display
     const mapPoint = (p) => {
-      const nx = mirrorX ? 1 - clamp01(p.x) : clamp01(p.x);
+      const nx = 1 - clamp01(p.x);
+      const ny = clamp01(p.y);
       return {
         x: nx * renderW + offsetX,
-        y: clamp01(p.y) * renderH + offsetY,
+        y: ny * renderH + offsetY,
       };
     };
 
-    const drawHands = showLandmarks && hasHand && primaryHand ? [primaryHand] : [];
+    const isDynamicMode = dynamicModeRef.current;
+    const drawHands =
+      showLandmarks && hasHand && primaryHand && !isDynamicMode ? [primaryHand] : [];
     if (drawHands.length) {
       // Draw landmarks in the same space as the mirrored video
       ctx.save();
@@ -2553,13 +2817,14 @@ export default function InterpreterPage() {
           x: (hand[5].x + hand[9].x + hand[17].x) / 3 + (wrist.x - hand[0].x) / 3,
           y: (hand[5].y + hand[9].y + hand[17].y) / 3 + (wrist.y - hand[0].y) / 3,
         };
-        const { x: palmX, y: palmY } = mapPoint(centerPoint);
-        
-        // Draw palm center as larger circle
-        ctx.fillStyle = "rgba(255, 100, 0, 0.95)";
-        ctx.beginPath();
-        ctx.arc(palmX, palmY, 6, 0, Math.PI * 2);
-        ctx.fill();
+        // Orange dot = palm center (avg of knuckles + wrist), not a MediaPipe landmark
+        if (!dynamicModeRef.current) {
+          const { x: palmX, y: palmY } = mapPoint(centerPoint);
+          ctx.fillStyle = "rgba(255, 100, 0, 0.95)";
+          ctx.beginPath();
+          ctx.arc(palmX, palmY, 6, 0, Math.PI * 2);
+          ctx.fill();
+        }
         
         // Draw individual landmarks
         ctx.fillStyle = "rgba(0, 255, 0, 0.9)";
@@ -2588,6 +2853,47 @@ export default function InterpreterPage() {
       });
 
       ctx.restore();
+    }
+
+    if (isDynamicMode && hasHand && primaryHand) {
+      recordDynamicStrokeFrame(primaryHand, mapPoint);
+      const lockedFinger = dynamicStrokeRef.current.finger;
+      if (lockedFinger) {
+        ctx.save();
+        drawFingerChainOnly(ctx, primaryHand, lockedFinger, mapPoint);
+        const trail = motionTrailRef.current;
+        if (trail.length > 1) {
+          ctx.strokeStyle =
+            lockedFinger === "J"
+              ? "rgba(251, 191, 36, 0.95)"
+              : "rgba(96, 165, 250, 0.95)";
+          ctx.lineWidth = 3;
+          ctx.lineJoin = "round";
+          ctx.lineCap = "round";
+          ctx.beginPath();
+          trail.forEach((pt, i) => {
+            if (i === 0) ctx.moveTo(pt.x, pt.y);
+            else ctx.lineTo(pt.x, pt.y);
+          });
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    } else if (!isDynamicMode && motionTrailRef.current.length) {
+      motionTrailRef.current = [];
+    }
+
+    if (isDynamicMode) {
+      const stroke = dynamicStrokeRef.current;
+      let label = "Hold Ctrl — pinky (J) or index (Z), release to confirm";
+      if (stroke.finger === "J") label = "Drawing J (pinky) — release Ctrl";
+      else if (stroke.finger === "Z") label = "Drawing Z (index) — release Ctrl";
+      else if (hasHand) label = "Extend pinky only (J) or index only (Z)";
+      setLocalLabel(label);
+      sendLiveLabel(label);
+      setDetectionConfidence(hasHand ? Math.round((presence?.score ?? 0) * 100) : 0);
+      if (hasHand) lastHandSeenRef.current = now;
+      return;
     }
 
     if (!hasHand) {
@@ -2686,7 +2992,7 @@ export default function InterpreterPage() {
     const stability = computeStabilityScore(hands);
     const bucketStabilityMin = poseBucket === "fist" ? 0.08 : 0.12;  // Reduced for better detection
     const bucketPresenceMin = poseBucket === "fist" ? 0.2 : 0.25;    // Reduced for better detection
-    const interp = interpretFromMulti(hands);
+    let interp = interpretFromMulti(hands);
     const strongA = hasHand ? isStrongA(primaryHand) : false;
     const strongB = hasHand ? isStrongB(primaryHand) : false;
     const consistency = computeConsistencyScore(interp.label);
@@ -2818,11 +3124,12 @@ export default function InterpreterPage() {
       return safeLabel;
     })();
 
-    const modelLabel =
-      stablePred?.label ||
-      heldStableLabel ||
-      (recentModelOk ? sanitizeModelLabel(recentModel.label) : "") ||
-      (tfPred?.label ? sanitizeModelLabel(tfPred.label) : "");
+    const modelLabel = dynamicModeRef.current
+      ? ""
+      : stablePred?.label ||
+        heldStableLabel ||
+        (recentModelOk ? sanitizeModelLabel(recentModel.label) : "") ||
+        (tfPred?.label ? sanitizeModelLabel(tfPred.label) : "");
     let effectiveModelLabel = modelLabel;
     let effectiveModelConf =
       stablePred?.conf ?? (recentModelOk ? recentModel.conf : 0) ?? tfPred?.conf ?? 0;
@@ -2847,12 +3154,20 @@ export default function InterpreterPage() {
       effectiveModelConf = recentModel?.conf ?? 0;
       effectiveModelMargin = recentModel?.margin ?? 0;
     }
-    if (strongA && (!effectiveModelLabel || effectiveModelLabel !== "A")) {
+    if (
+      !isDynamicMode &&
+      strongA &&
+      (!effectiveModelLabel || effectiveModelLabel !== "A")
+    ) {
       effectiveModelLabel = "A";
       effectiveModelConf = Math.max(effectiveModelConf, 0.92);
       effectiveModelMargin = Math.max(effectiveModelMargin, 0.28);
     }
-    if (strongB && (!effectiveModelLabel || effectiveModelLabel !== "B")) {
+    if (
+      !isDynamicMode &&
+      strongB &&
+      (!effectiveModelLabel || effectiveModelLabel !== "B")
+    ) {
       effectiveModelLabel = "B";
       effectiveModelConf = Math.max(effectiveModelConf, 0.9);
       effectiveModelMargin = Math.max(effectiveModelMargin, 0.25);
@@ -2883,6 +3198,7 @@ export default function InterpreterPage() {
       (effectiveModelLabel === "A" && strongHeuristic === "O") ||
       forceHeuristic;
     if (
+      !isDynamicMode &&
       strongHeuristic &&
       preferHeuristic &&
       (!effectiveModelLabel || effectiveModelLabel !== strongHeuristic)
@@ -2891,38 +3207,18 @@ export default function InterpreterPage() {
       effectiveModelConf = Math.max(effectiveModelConf, 0.93);
       effectiveModelMargin = Math.max(effectiveModelMargin, 0.28);
     }
-    const heuristicLetter = interp.pattern === "LETTER" ? interp.letter : "";
+    const heuristicLetter =
+      !isDynamicMode && interp.pattern === "LETTER" ? interp.letter : "";
     const modelWeak =
       !effectiveModelLabel || effectiveModelConf < 0.85 || effectiveModelMargin < 0.12;
-    if (heuristicLetter && (modelWeak || AMBIGUOUS_A_LABELS.has(effectiveModelLabel))) {
+    if (
+      !isDynamicMode &&
+      heuristicLetter &&
+      (modelWeak || AMBIGUOUS_A_LABELS.has(effectiveModelLabel))
+    ) {
       effectiveModelLabel = heuristicLetter;
       effectiveModelConf = Math.max(effectiveModelConf, 0.9);
       effectiveModelMargin = Math.max(effectiveModelMargin, 0.25);
-    }
-
-    // Check for dynamic J and Z gestures using motion tracking
-    if (hasHand && primaryHand) {
-      motionHistoryRef.current.push(primaryHand);
-      // Keep only last 10 frames for motion history
-      if (motionHistoryRef.current.length > 10) {
-        motionHistoryRef.current.shift();
-      }
-
-      // Detect J motion
-      if (detectJMotion(primaryHand) && !effectiveModelLabel) {
-        effectiveModelLabel = "J";
-        effectiveModelConf = 0.92;
-        effectiveModelMargin = 0.25;
-        motionHistoryRef.current = []; // Reset after detection
-      }
-
-      // Detect Z motion
-      if (detectZMotion(primaryHand) && !effectiveModelLabel) {
-        effectiveModelLabel = "Z";
-        effectiveModelConf = 0.92;
-        effectiveModelMargin = 0.25;
-        motionHistoryRef.current = []; // Reset after detection
-      }
     }
 
     const stableLabel = stablePred?.label || "";
@@ -2954,8 +3250,8 @@ export default function InterpreterPage() {
       interp.pattern = "UNKNOWN";
     }
 
-    // backend predict (primary) - always try if we have a hand
-    if (reliableHand) {
+    // backend predict (static letters only — paused during Ctrl dynamic mode)
+    if (reliableHand && !isDynamicMode) {
       const nowMs = Date.now();
       const state = lastBackendPredictRef.current;
       if (state.nextTs && nowMs < state.nextTs) {
@@ -3124,9 +3420,13 @@ export default function InterpreterPage() {
       HIGH_CONF_OVERRIDE_LABELS.has(confirmLetter) &&
       modelConf >= HIGH_CONF_OVERRIDE_CONF &&
       modelMargin >= HIGH_CONF_OVERRIDE_MARGIN;
-    const stabilityReqFinal = overrideLetter
-      ? Math.min(stabilityReq, HIGH_CONF_OVERRIDE_STABILITY)
-      : stabilityReq;
+    const dynamicConfirm =
+      dynamicModeRef.current && DYNAMIC_LABELS.has(confirmLetter);
+    const stabilityReqFinal = dynamicConfirm
+      ? 0.12
+      : overrideLetter
+        ? Math.min(stabilityReq, HIGH_CONF_OVERRIDE_STABILITY)
+        : stabilityReq;
     const strictLabel = STRICT_LABELS.has(confirmLetter) || confirmLetter === "space";
     const { conf: confMin, margin: marginMin } = getLabelThresholds(confirmLetter, strictLabel);
     const nowMs = Date.now();
@@ -3136,9 +3436,11 @@ export default function InterpreterPage() {
     const repeatGapOk = !sameLetter || nowMs - lastConfirm.ts > REPEAT_SAME_LETTER_GAP_MS;
     const confOk =
       hasModelPred &&
-      ((modelConf >= confMin && modelMargin >= marginMin) || overrideLetter) &&
+      (dynamicConfirm ||
+        (modelConf >= confMin && modelMargin >= marginMin) ||
+        overrideLetter) &&
       handRecentlySeen &&
-      (reliableHand || overrideLetter) &&
+      (reliableHand || overrideLetter || dynamicConfirm) &&
       cooldownOk &&
       repeatGapOk;
     if (
@@ -3147,7 +3449,7 @@ export default function InterpreterPage() {
       confirmLetter &&
       confirmLockRef.current !== confirmLetter &&
       confOk &&
-      allowedLetters.current.has(confirmLetter)
+      isLetterAllowed(confirmLetter)
     ) {
       if (candidate.letter !== confirmLetter) {
         candidateRef.current = {
@@ -3159,7 +3461,12 @@ export default function InterpreterPage() {
         const held = now - candidate.startedAt;
         candidateRef.current.lastSeenAt = now;
 
-        const holdMsBase = confirmLetter === "space" ? SPACE_CONFIRM_MS : getHoldMs(confirmLetter);
+        const holdMsBase =
+          confirmLetter === "space"
+            ? SPACE_CONFIRM_MS
+            : dynamicModeRef.current && DYNAMIC_LABELS.has(confirmLetter)
+              ? DYNAMIC_CONFIRM_HOLD_MS
+              : getHoldMs(confirmLetter);
         const holdMs = strongConfirm ? Math.min(holdMsBase, 900) : holdMsBase;
         if (held >= holdMs) {
           confirmStableLetter(confirmLetter);
@@ -3607,9 +3914,9 @@ export default function InterpreterPage() {
               </button>
               {showInfo && (
                 <div className="absolute left-1/2 top-[calc(100%+10px)] -translate-x-1/2 w-[320px] rounded-xl border border-emerald-400/40 bg-slate-950/95 p-3 text-sm text-white leading-relaxed shadow-[0_18px_50px_rgba(5,15,20,0.85)] ring-1 ring-emerald-400/20 z-[200]">
-                  Real-time ASL alphabet interpretation. Hold a steady gesture for about 1.7 seconds
+                  Real-time ASL alphabet interpretation. Hold a steady gesture for about 1.7 to 2.5 seconds
                   to confirm the letter. Auto-speak reads the phrase when your hand is lowered for
-                  ~0.85 seconds.
+                  ~0.85 seconds. Press ctrl for dynamic mode "J/Z" with faster response. Join a room to connect with partners.
                 </div>
               )}
             </div>
@@ -3640,7 +3947,7 @@ export default function InterpreterPage() {
                        <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)] animate-pulse"></div>
                        <h2 className="text-sm font-bold tracking-wide uppercase text-white">You</h2>
                      </div>
-                     <div className="flex items-center gap-3">
+                     <div className="flex items-center gap-2 flex-wrap justify-end">
                         <span className="text-[11px] font-semibold text-emerald-400/90 bg-emerald-400/10 px-2 py-1.5 rounded-md border border-emerald-500/20 uppercase tracking-wide">
                           Detection: {detectionConfidence}%
                         </span>
@@ -3659,7 +3966,7 @@ export default function InterpreterPage() {
                       />
                       <canvas
                         ref={canvasRef}
-                        className="absolute inset-0 pointer-events-none"
+                        className="absolute inset-0 w-full h-full pointer-events-none"
                       />
                       {/* Video Overlays */}
                       <div className="absolute inset-x-0 bottom-0 p-5 bg-gradient-to-t from-black/95 via-black/60 to-transparent flex flex-col justify-end transition-opacity">
