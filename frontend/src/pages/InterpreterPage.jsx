@@ -15,9 +15,9 @@ let globalHandInitPromise = null;
 
 const NO_DETECT_SPEAK_MS = 850; // faster phrase speak after ~0.85s of no hand
 const STABLE_MS_PER_LETTER = 1500; // confirm after 1.5s of stable hold
-const MIN_HAND_SCORE = 0.3;
-const MIN_HAND_SPAN = 0.08;
-const MIN_HAND_AREA = 0.006;
+const MIN_HAND_SCORE = 0.35;  // Reduced for better palm detection
+const MIN_HAND_SPAN = 0.09;   // Reduced for better palm detection
+const MIN_HAND_AREA = 0.009;  // Reduced for better palm detection
 const PREDICT_INTERVAL_MS = 900;
 const PREDICT_INTERVAL_STABLE_MS = 900;
 const PREDICT_BACKOFF_MS = 2500;
@@ -45,8 +45,8 @@ const STABLE_LABEL_HOLD_MS = 1500;
 const MIN_POSE_DELTA = 0.03;
 const BACKEND_POSE_CHANGE_MIN = 0.02;
 const MIN_NORM_INTERVAL_MS = 150;
-const BACKEND_MIN_STABILITY = 0.4;
-const BACKEND_MIN_PRESENCE = 0.3;
+const BACKEND_MIN_STABILITY = 0.3;  // Reduced for better palm tracking
+const BACKEND_MIN_PRESENCE = 0.2;   // Reduced for better palm detection
 const MIRROR_LEFT_HAND = true;
 const DYNAMIC_LABELS = new Set(["J", "Z"]);
 const NON_LETTER_LABELS = new Set(["del", "nothing"]);
@@ -82,6 +82,8 @@ const HOLD_MS_BY_LABEL = {
   U: 900,
   V: 1600,
   W: 1700,
+  J: 1200,  // Dynamic motion gesture
+  Z: 1200,  // Dynamic motion gesture
 };
 const CONF_MIN_BY_LABEL = {
   A: 0.8,
@@ -106,6 +108,8 @@ const CONF_MIN_BY_LABEL = {
   U: 0.76,
   V: 0.8,
   W: 0.82,
+  J: 0.9,   // Motion-based detection
+  Z: 0.9,   // Motion-based detection
 };
 const MARGIN_MIN_BY_LABEL = {
   A: 0.12,
@@ -130,6 +134,8 @@ const MARGIN_MIN_BY_LABEL = {
   U: 0.06,
   V: 0.12,
   W: 0.14,
+  J: 0.25,  // Motion-based detection
+  Z: 0.25,  // Motion-based detection
 };
 const BUCKET_LABELS = {
   fist: new Set(["A", "E", "S", "T", "M", "N"]),
@@ -208,9 +214,9 @@ async function getHandLandmarker() {
         },
         runningMode: "VIDEO",
         numHands: 1,
-        minHandDetectionConfidence: 0.35,
-        minHandPresenceConfidence: 0.35,
-        minTrackingConfidence: 0.4,
+        minHandDetectionConfidence: 0.55,  // Reduced for better palm detection sensitivity
+        minHandPresenceConfidence: 0.55,   // Reduced for better palm detection sensitivity
+        minTrackingConfidence: 0.65,       // Slightly reduced for stable tracking
       });
 
     globalHandLandmarker = handLandmarker;
@@ -297,6 +303,7 @@ export default function InterpreterPage() {
   const lastHandSeenRef = useRef(0);
 
   const noDetectionTimeout = useRef(null);
+  const motionHistoryRef = useRef([]);  // Track hand position over time for J and Z detection
   const socketRef = useRef(null);
   const peerRef = useRef(null);
   const remoteStreamRef = useRef(null);
@@ -541,6 +548,28 @@ export default function InterpreterPage() {
     if (phrase) speak(phrase, true);
   }
 
+  // Add space to letter sequence
+  function addSpace() {
+    if (letterSequence.length === 0 || letterSequence[letterSequence.length - 1] !== "") {
+      const newSequence = [...letterSequence, ""];
+      setLetterSequence(newSequence);
+      letterSequenceRef.current = newSequence;
+    }
+  }
+
+  // Handle spacebar press for adding spaces
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.code === "Space" && isCameraOn && e.target === document.body) {
+        e.preventDefault();
+        addSpace();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [letterSequence, isCameraOn]);
+
   // ---------------- CAMERA ----------------
   async function startCamera() {
     if (isCameraOn) return;
@@ -738,6 +767,45 @@ export default function InterpreterPage() {
     return { ok: sizeOk && scoreOk, score: clamp01(sizeScore * confScore), rawScore };
   }
 
+  function validatePalmLandmarks(hand) {
+    // Validate palm landmark quality for accurate detection
+    if (!hand || hand.length !== 21) return { valid: false, quality: 0 };
+    
+    // Check that landmarks form a reasonable hand structure
+    const wrist = hand[0];     // Wrist
+    const indexMcp = hand[5];  // Index MCP
+    const middleMcp = hand[9]; // Middle MCP
+    const pinkyMcp = hand[17]; // Pinky MCP
+    
+    if (!wrist || !indexMcp || !middleMcp || !pinkyMcp) {
+      return { valid: false, quality: 0 };
+    }
+    
+    // Verify reasonable distances between key palm points
+    const wristToIndex = getDistance(wrist, indexMcp);
+    const wristToMiddle = getDistance(wrist, middleMcp);
+    const wristToPinky = getDistance(wrist, pinkyMcp);
+    
+    // Landmarks should form a spread hand pattern (relaxed thresholds)
+    const minDistance = 0.01;   // Very low minimum for diverse hand positions
+    const maxDistance = 1.5;    // High maximum for all hand sizes
+    
+    const distancesValid = 
+      wristToIndex >= minDistance && wristToIndex <= maxDistance &&
+      wristToMiddle >= minDistance && wristToMiddle <= maxDistance &&
+      wristToPinky >= minDistance && wristToPinky <= maxDistance;
+    
+    // Calculate palm quality score based on landmark spread (very lenient)
+    const avgDistance = (wristToIndex + wristToMiddle + wristToPinky) / 3;
+    const optimalDistance = 0.1;
+    const quality = clamp01(1 - Math.abs(avgDistance - optimalDistance) / 1.0);
+    
+    return { 
+      valid: distancesValid && quality > 0.05,  // Very lenient threshold
+      quality: quality
+    };
+  }
+
   function isRotationHeavy(hand) {
     if (!hand || hand.length < 21) return false;
     let minX = Infinity;
@@ -827,11 +895,13 @@ export default function InterpreterPage() {
       });
     });
     const avgMove = count ? totalMove / count : 0;
-    if (avgMove > 0.035) {
+    // More responsive to hand movement for better palm tracking
+    if (avgMove > 0.08) {
       smoothedHandsRef.current = hands;
       return hands;
     }
-    const alpha = 0.3;
+    // Lighter smoothing to maintain palm accuracy
+    const alpha = 0.5;
     const smoothed = hands.map((hand, handIndex) => {
       const prevHand = prev[handIndex];
       if (!prevHand || prevHand.length !== hand.length) return hand;
@@ -1197,6 +1267,87 @@ export default function InterpreterPage() {
     const spread =
       thumbTip && pinkyTip ? getDistance(thumbTip, pinkyTip) > palmSize * 0.75 : true;
     return spread;
+  }
+
+  // Detect dynamic J: Index finger pointing + downward curved motion
+  function detectJMotion(hand) {
+    if (!hand || hand.length < 21) return false;
+    const indexExt = isFingerExtended(hand, 8, 6, 5);
+    const middleExt = isFingerExtended(hand, 12, 10, 9);
+    const ringExt = isFingerExtended(hand, 16, 14, 13);
+    const pinkyExt = isFingerExtended(hand, 20, 18, 17);
+    const thumbExt = isThumbExtended(hand);
+    
+    // J pose: only index extended, others curled
+    const jPose = indexExt && !middleExt && !ringExt && !pinkyExt && thumbExt;
+    if (!jPose) return false;
+
+    // Check motion: index tip should move downward and curve
+    if (motionHistoryRef.current.length < 5) {
+      motionHistoryRef.current.push(hand);
+      return false;
+    }
+
+    const indexTip = hand[8];
+    const oldHand = motionHistoryRef.current[0];
+    const oldIndexTip = oldHand?.[8];
+    
+    if (!indexTip || !oldIndexTip) return false;
+
+    // Motion should be downward (y increases)
+    const verticalMotion = indexTip.y - oldIndexTip.y;
+    const horizontalMotion = Math.abs(indexTip.x - oldIndexTip.x);
+    
+    // J is downward curve: mostly vertical, small horizontal
+    return verticalMotion > 0.05 && horizontalMotion < verticalMotion * 0.5;
+  }
+
+  // Detect dynamic Z: Zig-zag motion right-down-left
+  function detectZMotion(hand) {
+    if (!hand || hand.length < 21) return false;
+    const indexExt = isFingerExtended(hand, 8, 6, 5);
+    const thumbExt = isThumbExtended(hand);
+    const middleExt = isFingerExtended(hand, 12, 10, 9);
+    const ringExt = isFingerExtended(hand, 16, 14, 13);
+    const pinkyExt = isFingerExtended(hand, 20, 18, 17);
+    
+    // Z pose: index and middle extended, others curled
+    const zPose = indexExt && middleExt && !ringExt && !pinkyExt && !thumbExt;
+    if (!zPose) return false;
+
+    // Need at least 8 frames to detect zig-zag pattern
+    if (motionHistoryRef.current.length < 8) {
+      motionHistoryRef.current.push(hand);
+      return false;
+    }
+
+    const indexTip = hand[8];
+    if (!indexTip) return false;
+
+    // Analyze motion pattern: should have direction changes (zig-zag)
+    let directionChanges = 0;
+    let prevDx = 0;
+    let prevDy = 0;
+
+    for (let i = 1; i < Math.min(motionHistoryRef.current.length, 8); i++) {
+      const curr = motionHistoryRef.current[i]?.[8];
+      const prev = motionHistoryRef.current[i - 1]?.[8];
+      if (!curr || !prev) continue;
+
+      const dx = curr.x - prev.x;
+      const dy = curr.y - prev.y;
+
+      // Check if direction changed (sign flip)
+      if ((prevDx > 0 && dx < -0.01) || (prevDx < -0.01 && dx > 0)) {
+        directionChanges++;
+      }
+
+      prevDx = dx;
+      prevDy = dy;
+    }
+
+    // Z pattern should have 2+ direction changes
+    return directionChanges >= 2;
   }
 
   function isStrongO(hand) {
@@ -2333,12 +2484,15 @@ export default function InterpreterPage() {
       ? primaryHandedness?.[0]?.score
       : primaryHandedness?.score;
     const rawPresence = getHandPresence(rawPrimary, handednesses);
-    const stableOk = rawPresence.ok || rawPresence.score >= 0.15;
+    const stableOk = rawPresence.ok || rawPresence.score >= 0.08;  // Reduced from 0.15 for better detection
     const stabilized = stabilizeHands(rawHands, stableOk);
     const hands = smoothHands(stabilized, stableOk);
     const primaryHand = hands[0];
     const presence = getHandPresence(primaryHand, handednesses);
-    const hasHand = !!primaryHand && (presence?.score ?? 0) >= 0.15;
+    
+    // Validate palm landmark accuracy
+    const palmValidation = validatePalmLandmarks(primaryHand);
+    const hasHand = !!primaryHand && (presence?.score ?? 0) >= 0.05 && palmValidation.valid;  // Reduced from 0.15
     if (hasHand) {
       lastHandMetaRef.current = {
         handedness: handednessLabel || "",
@@ -2393,6 +2547,22 @@ export default function InterpreterPage() {
       ctx.fillStyle = "rgba(0, 255, 0, 0.9)";
 
       drawHands.forEach((hand) => {
+        // Calculate and draw palm center (wrist to hand center)
+        const wrist = hand[0];
+        const centerPoint = {
+          x: (hand[5].x + hand[9].x + hand[17].x) / 3 + (wrist.x - hand[0].x) / 3,
+          y: (hand[5].y + hand[9].y + hand[17].y) / 3 + (wrist.y - hand[0].y) / 3,
+        };
+        const { x: palmX, y: palmY } = mapPoint(centerPoint);
+        
+        // Draw palm center as larger circle
+        ctx.fillStyle = "rgba(255, 100, 0, 0.95)";
+        ctx.beginPath();
+        ctx.arc(palmX, palmY, 6, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Draw individual landmarks
+        ctx.fillStyle = "rgba(0, 255, 0, 0.9)";
         hand.forEach((p, idx) => {
           const { x: px, y: py } = mapPoint(p);
           ctx.beginPath();
@@ -2403,6 +2573,8 @@ export default function InterpreterPage() {
           ctx.fillText(String(idx), px + 5, py - 5);
           ctx.fillStyle = "rgba(0, 255, 0, 0.9)";
         });
+        
+        // Draw hand structure connections
         ctx.beginPath();
         const seq = [0, 1, 2, 3, 4, 3, 2, 5, 6, 7, 8, 5, 9, 10, 11, 12, 9, 13, 14, 15, 16, 13, 17, 18, 19, 20];
         seq.forEach((idx, i) => {
@@ -2474,6 +2646,7 @@ export default function InterpreterPage() {
       modelPredRef.current = { label: "", conf: 0, ts: 0 };
       modelHistoryRef.current = [];
       normHistoryRef.current = [];
+      motionHistoryRef.current = [];  // Reset motion history for J and Z
       lastNormVecRef.current = null;
       lastNormVecTsRef.current = 0;
       lastStableLabelRef.current = { label: "", ts: 0 };
@@ -2511,8 +2684,8 @@ export default function InterpreterPage() {
 
     const base = clamp01(computeBaseScore(result) * (presence.score || 1));
     const stability = computeStabilityScore(hands);
-    const bucketStabilityMin = poseBucket === "fist" ? 0.18 : 0.28;
-    const bucketPresenceMin = poseBucket === "fist" ? 0.35 : 0.45;
+    const bucketStabilityMin = poseBucket === "fist" ? 0.08 : 0.12;  // Reduced for better detection
+    const bucketPresenceMin = poseBucket === "fist" ? 0.2 : 0.25;    // Reduced for better detection
     const interp = interpretFromMulti(hands);
     const strongA = hasHand ? isStrongA(primaryHand) : false;
     const strongB = hasHand ? isStrongB(primaryHand) : false;
@@ -2726,6 +2899,32 @@ export default function InterpreterPage() {
       effectiveModelConf = Math.max(effectiveModelConf, 0.9);
       effectiveModelMargin = Math.max(effectiveModelMargin, 0.25);
     }
+
+    // Check for dynamic J and Z gestures using motion tracking
+    if (hasHand && primaryHand) {
+      motionHistoryRef.current.push(primaryHand);
+      // Keep only last 10 frames for motion history
+      if (motionHistoryRef.current.length > 10) {
+        motionHistoryRef.current.shift();
+      }
+
+      // Detect J motion
+      if (detectJMotion(primaryHand) && !effectiveModelLabel) {
+        effectiveModelLabel = "J";
+        effectiveModelConf = 0.92;
+        effectiveModelMargin = 0.25;
+        motionHistoryRef.current = []; // Reset after detection
+      }
+
+      // Detect Z motion
+      if (detectZMotion(primaryHand) && !effectiveModelLabel) {
+        effectiveModelLabel = "Z";
+        effectiveModelConf = 0.92;
+        effectiveModelMargin = 0.25;
+        motionHistoryRef.current = []; // Reset after detection
+      }
+    }
+
     const stableLabel = stablePred?.label || "";
     const confirmedCandidateLabel = stableLabel || effectiveModelLabel || "";
     if (
@@ -3137,6 +3336,7 @@ export default function InterpreterPage() {
           await createAndSendOffer();
         } else if (payload.type === "peer-left") {
           console.log("[WebRTC] peer left");
+          setChatMessages([]);  // Clear chat when partner leaves
           if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
           remoteStreamRef.current = null;
           if (peerRef.current) {
@@ -3172,6 +3372,7 @@ export default function InterpreterPage() {
 
     ws.onclose = () => {
       console.log("[WebRTC] WS closed");
+      setChatMessages([]);  // Clear chat when connection closes
       socketRef.current = null;
       setRemoteActive(false);
     };
@@ -3303,6 +3504,7 @@ export default function InterpreterPage() {
   function handleLeaveRoom() {
     setRoomJoined(false);
     setMatchStatus("Live detection");
+    setChatMessages([]);  // Clear chat when leaving
     if (peerRef.current) {
       console.log("[WebRTC] closing peer connection");
       peerRef.current.close();
@@ -3424,325 +3626,288 @@ export default function InterpreterPage() {
       </header>
 
       {/* Main grid */}
-      <main className="fade-up flex-1 max-w-[1400px] w-full mx-auto flex flex-col gap-4 px-2 sm:px-4 lg:px-6 py-4">
-        {/* TOP: YOU / PARTNER / CHAT */}
-        <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-          {/* YOU */}
-          <div className="surface-card-strong flex flex-col overflow-visible">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/70">
-              <h2 className="text-base font-semibold">YOU</h2>
-              <p className="text-xs text-slate-300">
-                ASL Alphabet
-              </p>
-            </div>
+      <main className="fade-up flex-1 max-w-[1600px] w-full mx-auto flex flex-col gap-6 px-4 sm:px-6 lg:px-8 py-6 h-full min-h-[800px]">
+        <section className="grid grid-cols-1 lg:grid-cols-12 gap-6 h-full flex-1">
+          
+          {/* LEFT: YOU & PARTNER VIDEOS (Takes 8 columns) */}
+          <div className="lg:col-span-8 flex flex-col gap-6">
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 flex-1 min-h-[500px]">
+                {/* YOU CARD */}
+                <div className="surface-card flex flex-col overflow-hidden rounded-2xl relative shadow-[0_8px_30px_rgba(0,0,0,0.2)] border-white/10 group">
+                   {/* Header */}
+                   <div className="flex items-center justify-between px-5 py-4 border-b border-white/5 bg-black/20 z-10">
+                     <div className="flex items-center gap-3">
+                       <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)] animate-pulse"></div>
+                       <h2 className="text-sm font-bold tracking-wide uppercase text-white">You</h2>
+                     </div>
+                     <div className="flex items-center gap-3">
+                        <span className="text-[11px] font-semibold text-emerald-400/90 bg-emerald-400/10 px-2 py-1.5 rounded-md border border-emerald-500/20 uppercase tracking-wide">
+                          Detection: {detectionConfidence}%
+                        </span>
+                     </div>
+                   </div>
 
-            <div className="relative bg-slate-950/60 w-full h-48 sm:h-56 overflow-hidden flex-shrink-0">
-              <video
-                ref={localVideoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-full object-cover"
-                style={{
-                  transform: "scaleX(-1)",
-                }}
-              />
-              <canvas
-                ref={canvasRef}
-                className="absolute inset-0 pointer-events-none"
-              />
-            </div>
+                   {/* Video Area */}
+                   <div className="relative flex-1 bg-gradient-to-b from-slate-900 to-black flex flex-col overflow-hidden">
+                     <video
+                        ref={localVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className="absolute inset-0 w-full h-full object-cover opacity-80"
+                        style={{ transform: "scaleX(-1)" }}
+                      />
+                      <canvas
+                        ref={canvasRef}
+                        className="absolute inset-0 pointer-events-none"
+                      />
+                      {/* Video Overlays */}
+                      <div className="absolute inset-x-0 bottom-0 p-5 bg-gradient-to-t from-black/95 via-black/60 to-transparent flex flex-col justify-end transition-opacity">
+                         <div className="flex items-end justify-between">
+                            <div>
+                               <p className="text-[11px] text-emerald-400/80 uppercase tracking-widest font-semibold mb-1">Live Sign</p>
+                               <p className="text-2xl sm:text-3xl font-bold text-white drop-shadow-[0_2px_10px_rgba(0,0,0,0.8)]">{localLabel}</p>
+                            </div>
+                            {confirmedLetter && (
+                              <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-emerald-500/20 border border-emerald-400/40 backdrop-blur-md flex items-center justify-center shadow-[0_8px_32px_rgba(52,211,153,0.3)]">
+                                 <span className="text-3xl sm:text-4xl font-bold text-emerald-300 drop-shadow-md">{confirmedLetter}</span>
+                              </div>
+                            )}
+                         </div>
+                      </div>
+                      {!isCameraOn && (
+                         <div className="absolute inset-0 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm z-20">
+                            <button onClick={startCamera} className="btn-primary px-6 py-3 rounded-xl shadow-[0_8px_20px_rgba(52,211,153,0.3)] hover:scale-105 transition-all flex items-center gap-2 font-medium">
+                               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                               Turn On Camera
+                            </button>
+                         </div>
+                      )}
+                   </div>
 
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 px-4 py-3 border-t border-slate-700/70 bg-slate-950/50 flex-shrink-0">
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <button
-                  onClick={startCamera}
-                  disabled={isCameraOn}
-                  className="btn-primary px-3 py-2 text-sm sm:text-base rounded disabled:opacity-60"
-                >
-                  Start
-                </button>
-                <button
-                  onClick={stopCamera}
-                  disabled={!isCameraOn}
-                  className="btn-secondary px-3 py-2 text-sm sm:text-base rounded text-rose-200 border-rose-500/40 hover:border-rose-400/70 disabled:opacity-60"
-                >
-                  Stop
-                </button>
-              </div>
-
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 text-sm text-slate-300">
-                <div className="flex items-center justify-between">
-                  <span>Detection:</span>
-                  <span
-                    className={`ml-1 font-semibold ${
-                      detectionConfidence >= 70
-                        ? "text-emerald-400"
-                        : detectionConfidence >= 40
-                        ? "text-amber-300"
-                        : "text-slate-300"
-                    }`}
-                  >
-                    {detectionConfidence}%
-                  </span>
+                   {/* Footer / Controls */}
+                   <div className="p-4 sm:p-5 bg-slate-900/80 border-t border-white/5 flex flex-col gap-4 backdrop-blur-md z-10">
+                      <div className="flex items-center justify-between bg-black/40 rounded-xl p-3 border border-white/5">
+                         <div className="flex flex-col">
+                            <span className="text-[10px] text-slate-400 uppercase tracking-widest mb-0.5">Message</span>
+                            <span className="text-emerald-300 font-mono text-lg leading-none break-words">{letterSequence.map((letter, i) => letter === "" ? " " : letter).join("") || <span className="opacity-30">...</span>}</span>
+                         </div>
+                      </div>
+                      <div className="flex items-center justify-between">
+                         <label className="flex items-center gap-2.5 text-sm text-slate-300 hover:text-white cursor-pointer transition-colors select-none group-hover:opacity-100">
+                           <div className="relative flex items-center justify-center">
+                             <input type="checkbox" checked={autoSpeak} onChange={(e) => setAutoSpeak(e.target.checked)} className="peer sr-only" />
+                             <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+                           </div>
+                           <span className="font-medium text-xs tracking-wide">Auto-speak</span>
+                         </label>
+                         
+                         <div className="flex items-center gap-2">
+                           {isCameraOn && (
+                              <button onClick={stopCamera} className="px-3.5 py-2 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-500/20 transition-colors text-xs font-semibold">Stop</button>
+                           )}
+                           <button onClick={() => speakLettersThenPhrase(letterSequence, true)} className="px-3.5 py-2 rounded-lg bg-white/5 text-slate-200 hover:bg-white/10 hover:text-white border border-white/10 transition-colors text-xs font-semibold shadow-sm">Speak</button>
+                           <button onClick={addSpace} className="px-3.5 py-2 rounded-lg bg-blue-500/10 text-blue-400 hover:bg-blue-500/20 border border-blue-500/20 transition-colors text-xs font-semibold" title="Add space (Spacebar)">Space</button>
+                           <button onClick={() => {
+                              resetSpeechState({
+                                 setLetterSequence,
+                                 setConfirmedLetter,
+                                 lastSpokenRef,
+                                 candidateRef,
+                                 frameHistory,
+                                 labelHistory,
+                                 noDetectionTimeout,
+                                 skipSpeakRef,
+                                 speakingRef,
+                                 letterSequenceRef,
+                                 lastAutoSpokenPhraseRef,
+                                 pendingAutoSpeakRef,
+                              });
+                              sendRoomPayload({ type: "clear-letters" });
+                           }} className="px-3.5 py-2 rounded-lg bg-white/5 text-slate-200 hover:bg-white/10 hover:text-white border border-white/10 transition-colors text-xs font-semibold shadow-sm">Clear</button>
+                         </div>
+                      </div>
+                   </div>
                 </div>
 
-                <label className="flex items-center gap-2 whitespace-nowrap">
-                  <input
-                    type="checkbox"
-                    checked={autoSpeak}
-                    onChange={(e) => setAutoSpeak(e.target.checked)}
-                    className="w-3 h-3 accent-emerald-400"
-                  />
-                  <span className="text-xs sm:text-sm">Auto-speak</span>
-                </label>
-              </div>
-            </div>
-          </div>
+                {/* PARTNER CARD */}
+                <div className="surface-card flex flex-col overflow-hidden rounded-2xl relative shadow-[0_8px_30px_rgba(0,0,0,0.2)] border-white/10 group">
+                   {/* Header */}
+                   <div className="flex items-center justify-between px-5 py-4 border-b border-white/5 bg-black/20 z-10">
+                     <div className="flex items-center gap-3">
+                       <div className={`w-2.5 h-2.5 rounded-full ${remoteActive ? 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)] animate-pulse' : 'bg-amber-400/80 shadow-[0_0_8px_rgba(251,191,36,0.5)]'}`}></div>
+                       <h2 className="text-sm font-bold tracking-wide uppercase text-white">Partner</h2>
+                     </div>
+                     {roomJoined && (
+                        <div className="flex items-center gap-2">
+                           <span className="text-[11px] font-mono font-medium text-emerald-400 bg-emerald-400/10 px-2 py-1 rounded border border-emerald-500/20 shadow-inner">
+                             {roomCode}
+                           </span>
+                           <button onClick={copyRoomCode} className="relative p-1.5 rounded bg-white/5 hover:bg-white/10 text-slate-300 transition-colors" title="Copy Room Code">
+                              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" /></svg>
+                              {copyMsg && <span className="absolute -top-7 left-1/2 -translate-x-1/2 text-[10px] font-medium text-emerald-400 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-500/30 whitespace-nowrap shadow-lg">{copyMsg}</span>}
+                           </button>
+                        </div>
+                     )}
+                   </div>
 
-          {/* PARTNER */}
-          <div className="surface-card-strong flex flex-col overflow-visible">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/70">
-              <h2 className="text-base font-semibold">PARTNER</h2>
-              <p className="text-xs text-slate-300">
-                {roomJoined ? roomCode : "none"}
-              </p>
-            </div>
+                   {/* Partner Video Area */}
+                   <div className="relative flex-1 bg-gradient-to-b from-slate-900 to-black flex flex-col overflow-hidden">
+                      <video
+                        ref={remoteVideoRef}
+                        autoPlay
+                        playsInline
+                        className={`absolute inset-0 w-full h-full object-cover transition-opacity duration-700 ${remoteActive ? "opacity-80" : "opacity-0"}`}
+                        style={{ transform: "scaleX(-1)" }}
+                      />
+                      
+                      {remoteActive && (
+                        <div className="absolute inset-x-0 bottom-0 p-5 bg-gradient-to-t from-black/95 via-black/60 to-transparent flex flex-col justify-end z-20">
+                           <div className="flex items-end justify-between">
+                              <div>
+                                 <p className="text-[11px] text-emerald-400/80 uppercase tracking-widest font-semibold mb-1">Live Sign</p>
+                                 <p className="text-2xl sm:text-3xl font-bold text-white drop-shadow-[0_2px_10px_rgba(0,0,0,0.8)]">{remoteLiveLabel}</p>
+                              </div>
+                              {remoteConfirmedLetter && (
+                                <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl bg-emerald-500/20 border border-emerald-400/40 backdrop-blur-md flex items-center justify-center shadow-[0_8px_32px_rgba(52,211,153,0.3)]">
+                                   <span className="text-3xl sm:text-4xl font-bold text-emerald-300 drop-shadow-md">{remoteConfirmedLetter}</span>
+                                </div>
+                              )}
+                           </div>
+                        </div>
+                      )}
+                      
+                      {!roomJoined && (
+                         <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm z-30 p-6 sm:p-8">
+                            <div className="w-14 h-14 rounded-full bg-emerald-500/10 flex items-center justify-center mb-5 border border-emerald-500/20 shadow-[0_0_30px_rgba(52,211,153,0.15)]">
+                              <svg className="w-7 h-7 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" /></svg>
+                            </div>
+                            <h3 className="text-lg font-semibold text-white mb-1 tracking-wide">Connect with Partner</h3>
+                            <p className="text-xs text-slate-400 text-center mb-6">Start a call to see remote signs</p>
+                            <div className="flex flex-col gap-3 w-full max-w-[260px]">
+                               <button onClick={handleCreateRoom} className="btn-primary w-full py-3 rounded-xl shadow-[0_8px_20px_rgba(52,211,153,0.25)] hover:scale-[1.02] transition-all font-medium text-sm">Create New Room</button>
+                               <div className="flex items-center gap-3 my-1 opacity-60">
+                                  <div className="h-px bg-white/20 flex-1"></div>
+                                  <span className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold">or</span>
+                                  <div className="h-px bg-white/20 flex-1"></div>
+                                </div>
+                               <div className="flex flex-col gap-2.5">
+                                  <input type="text" value={roomCode} onChange={e => setRoomCode(e.target.value)} placeholder="Enter Room Code" className="w-full bg-black/50 border border-white/10 rounded-xl px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all text-center tracking-wide" />
+                                  <button onClick={() => handleJoinRoom()} disabled={!roomCode.trim()} className="w-full py-3 rounded-xl bg-white/5 border border-white/10 text-white hover:bg-white/10 transition-colors font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed">Join Room</button>
+                               </div>
+                            </div>
+                         </div>
+                      )}
 
-            <div className="relative bg-slate-950/60 w-full h-48 sm:h-56 overflow-hidden flex-shrink-0">
-              <video
-                ref={remoteVideoRef}
-                autoPlay
-                playsInline
-                className={`w-full h-full object-cover ${remoteActive ? "" : "opacity-20"}`}
-                style={{ transform: "scaleX(-1)" }}
-              />
-              {!remoteActive && (
-                <p className="absolute inset-0 m-auto h-fit text-sm text-slate-300 text-center px-4">
-                  Join a room to start a call. Remote video & signs appear here.
-                </p>  
-              )}
-            </div>
-
-            <div className="px-4 py-3 border-t border-slate-700/70 bg-slate-950/50 flex flex-col gap-3 flex-shrink-0">
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                <button
-                  onClick={handleCreateRoom}
-                  disabled={roomJoined}
-                  className="btn-primary px-3 py-2 text-sm rounded disabled:opacity-60 w-full sm:w-auto"
-                >
-                  Create
-                </button>
-                <input
-                  type="text"
-                  value={roomCode}
-                  onChange={(e) => setRoomCode(e.target.value)}
-                  placeholder="Room code"
-                  className="flex-1 min-w-0 bg-transparent border border-white/10 rounded px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-300"
-                />
-                <button
-                  onClick={copyRoomCode}
-                  disabled={!roomCode.trim()}
-                  title="Copy room code"
-                  className="btn-secondary px-2 py-2 text-sm rounded disabled:opacity-60 w-full sm:w-auto"
-                >
-                  Copy
-                </button>
-                {copyMsg && (
-                  <span className="text-sm text-emerald-300 px-1 text-center whitespace-nowrap">{copyMsg}</span>
-                )}
-              </div>
-              <div className="flex flex-col sm:flex-row sm:items-center gap-2 justify-between">
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 flex-1">
-                  <button
-                    onClick={() => handleJoinRoom()}
-                    disabled={roomJoined}
-                    className="btn-secondary px-3 py-2 text-sm rounded disabled:opacity-60"
-                  >
-                    Join
-                  </button>
-                  <button
-                    onClick={handleLeaveRoom}
-                    disabled={!roomJoined}
-                    className="btn-ghost px-3 py-2 text-sm rounded disabled:opacity-60"
-                  >
-                    Leave
-                  </button>
+                      {roomJoined && !remoteActive && (
+                         <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-950/80 backdrop-blur-sm z-30 p-6 text-center">
+                            <div className="relative w-16 h-16 mb-6">
+                               <div className="absolute inset-0 rounded-full border-2 border-slate-700"></div>
+                               <div className="absolute inset-0 rounded-full border-2 border-emerald-400 border-t-transparent animate-spin"></div>
+                               <div className="absolute inset-0 flex items-center justify-center">
+                                 <div className="w-2 h-2 bg-emerald-400 rounded-full animate-pulse"></div>
+                               </div>
+                            </div>
+                            <h3 className="text-lg font-medium text-white mb-2">Waiting for partner</h3>
+                            <p className="text-sm text-slate-400 flex items-center gap-2">
+                               Share code: 
+                               <span className="font-mono text-emerald-300 bg-emerald-950/50 px-2.5 py-1 rounded border border-emerald-500/20">{roomCode}</span>
+                            </p>
+                         </div>
+                      )}
+                   </div>
+                   
+                   {/* Partner Footer */}
+                   <div className="p-4 sm:p-5 bg-slate-900/80 border-t border-white/5 flex flex-col gap-4 backdrop-blur-md z-10">
+                      <div className="flex items-center justify-between bg-black/40 rounded-xl p-3 border border-white/5">
+                         <div className="flex flex-col">
+                            <span className="text-[10px] text-slate-400 uppercase tracking-widest mb-0.5">Message</span>
+                            <span className="text-emerald-300 font-mono text-lg leading-none">{remoteLetters.join("") || <span className="opacity-30">...</span>}</span>
+                         </div>
+                      </div>
+                      <div className="flex items-center justify-between">
+                         <label className="flex items-center gap-2.5 text-sm text-slate-300 hover:text-white cursor-pointer transition-colors select-none group-hover:opacity-100">
+                           <div className="relative flex items-center justify-center">
+                             <input type="checkbox" checked={remoteAutoSpeak} onChange={(e) => setRemoteAutoSpeak(e.target.checked)} className="peer sr-only" />
+                             <div className="w-9 h-5 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-500"></div>
+                           </div>
+                           <span className="font-medium text-xs tracking-wide">Auto-speak</span>
+                         </label>
+                         
+                         <div className="flex items-center gap-2">
+                           {roomJoined && (
+                              <button onClick={handleLeaveRoom} className="px-3.5 py-2 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 border border-rose-500/20 transition-colors text-xs font-semibold">Leave</button>
+                           )}
+                           <button onClick={() => speakLettersThenPhrase(remoteLetters, true)} className="px-3.5 py-2 rounded-lg bg-white/5 text-slate-200 hover:bg-white/10 hover:text-white border border-white/10 transition-colors text-xs font-semibold shadow-sm">Speak</button>
+                         </div>
+                      </div>
+                   </div>
                 </div>
-                <p className="text-sm text-slate-300 text-center sm:text-right">
-                  Status: {roomJoined ? "In room" : "Idle"}
-                </p>
-              </div>
-            </div>
+             </div>
           </div>
 
-          {/* CHAT */}
-          <div className="surface-card-strong flex flex-col overflow-visible">
-            <div className="flex items-center justify-between px-3 py-2 border-b border-slate-700/70">
-              <h2 className="text-base font-semibold">Chat</h2>
-              <span className="text-xs text-slate-300">
-                {roomJoined ? "Active" : "No call"}
-              </span>
-            </div>
-
-            <div className="overflow-y-auto px-4 py-3 space-y-2 text-sm h-48 sm:h-56">
-              {chatMessages.length === 0 && (
-                <p className="text-slate-300">No messages yet.</p>
-              )}
-
-              {chatMessages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`flex ${
-                    msg.from === "me" ? "justify-end" : "justify-start"
-                  }`}
-                >
-                  <div
-                    className={`px-3 py-2 rounded-lg max-w-[80%] ${
-                      msg.from === "me"
-                        ? "bg-emerald-600 text-slate-950"
-                        : "bg-slate-800 text-slate-100"
-                    }`}
-                  >
-                    {msg.text}
-                  </div>
+          {/* RIGHT: CHAT (Takes 4 columns) */}
+          <div className="lg:col-span-4 h-[600px] lg:h-auto flex flex-col">
+             <div className="surface-card flex flex-col h-full overflow-hidden rounded-2xl shadow-[0_8px_30px_rgba(0,0,0,0.2)] border-white/10">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-white/5 bg-black/20 z-10">
+                   <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-emerald-500/10 flex items-center justify-center border border-emerald-500/20">
+                        <svg className="w-4 h-4 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                      </div>
+                      <h2 className="text-sm font-bold tracking-wide uppercase text-white">Live Chat</h2>
+                   </div>
+                   <span className={`text-[10px] font-bold tracking-widest uppercase px-3 py-1.5 rounded-full ${roomJoined ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shadow-[0_0_15px_rgba(52,211,153,0.1)]' : 'bg-slate-800 text-slate-400 border border-white/5'}`}>
+                      {roomJoined ? 'Connected' : 'Offline'}
+                   </span>
                 </div>
-              ))}
-            </div>
+                
+                <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-gradient-to-b from-slate-900/60 to-slate-950/80">
+                   {chatMessages.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-slate-500 space-y-4">
+                         <div className="w-16 h-16 rounded-full bg-slate-800/50 flex items-center justify-center">
+                            <svg className="w-8 h-8 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M17 8h2a2 2 0 012 2v6a2 2 0 01-2 2h-2v4l-4-4H9a1.994 1.994 0 01-1.414-.586m0 0L11 14h4a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2v4l.586-.586z" /></svg>
+                         </div>
+                         <p className="text-sm font-medium">No messages yet.</p>
+                      </div>
+                   ) : (
+                      chatMessages.map((msg, i) => (
+                         <div key={i} className={`flex ${msg.from === "me" ? "justify-end" : "justify-start"} animate-[fadeUp_0.3s_ease_both]`}>
+                            <div className={`px-4 py-3 rounded-2xl max-w-[85%] text-sm shadow-md ${msg.from === "me" ? "bg-emerald-500 text-emerald-950 rounded-br-sm font-medium" : "bg-slate-800 border border-white/5 text-slate-100 rounded-bl-sm"}`}>
+                               {msg.text}
+                            </div>
+                         </div>
+                      ))
+                   )}
+                </div>
 
-            <form
-              onSubmit={handleSendChat}
-              className="px-3 py-3 border-t border-slate-700/70 bg-slate-950/50 flex flex-col gap-2 flex-shrink-0"
-            >
-              <input
-                type="text"
-                value={chatInput}
-                onChange={(e) => setChatInput(e.target.value)}
-                placeholder="Type a message..."
-                className="w-full bg-transparent border border-white/10 rounded px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-300"
-              />
-              <button
-                type="submit"
-                className="btn-primary px-4 py-1.5 text-sm rounded w-full"
-              >
-                Send
-              </button>
-            </form>
-          </div>
-        </section>
-
-        {/* BOTTOM: LOCAL / REMOTE TEXT */}
-        <section className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {/* Local */}
-          <div className="surface-card p-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">
-                Your Signs (Local Interpretation)
-              </h2>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => speakLettersThenPhrase(letterSequence, true)}
-                  className="btn-ghost px-3 py-2 text-sm rounded"
-                >
-                  Speak phrase
-                </button>
-                <button
-                  onClick={() => {
-                    resetSpeechState({
-                      setLetterSequence,
-                      setConfirmedLetter,
-                      lastSpokenRef,
-                      candidateRef,
-                   frameHistory,
-                    labelHistory,
-                    noDetectionTimeout,
-                    skipSpeakRef,
-                    speakingRef,
-                    letterSequenceRef,
-                    lastAutoSpokenPhraseRef,
-                    pendingAutoSpeakRef,
-                  });
-                  sendRoomPayload({ type: "clear-letters" });
-                }}
-                className="btn-ghost px-3 py-2 text-sm rounded"
-              >
-                  Clear phrase
-                </button>
-              </div>
-            </div>
-
-            <div className="surface-card-strong px-4 py-3 text-base">
-              <p className="text-slate-300">Live:</p>
-              <p className="text-emerald-300 text-base mt-1">{localLabel}</p>
-
-              <p className="text-slate-300 mt-2">
-                Confirmed letter:{" "}
-                <span className="text-emerald-400">
-                  {confirmedLetter || "-"}
-                </span>
-              </p>
-
-              <p className="text-slate-300 mt-1">
-                Letters:{" "}
-                <span className="font-mono text-emerald-300">
-                  {letterSequence.join(" ") || "-"}
-                </span>
-              </p>
-            </div>
-          </div>
-
-          {/* Remote */}
-          <div className="surface-card p-4 flex flex-col gap-3">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Partner&apos;s Signs (Remote)</h2>
-              <div className="flex items-center gap-2">
-                <label className="flex items-center gap-2 text-sm text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={remoteAutoSpeak}
-                    onChange={(e) => setRemoteAutoSpeak(e.target.checked)}
-                    className="w-3 h-3 accent-emerald-400"
-                  />
-                  Auto-speak
-                </label>
-                <button
-                  onClick={() => speakLettersThenPhrase(remoteLetters, true)}
-                  className="btn-ghost px-3 py-2 text-sm rounded"
-                >
-                  Speak
-                </button>
-              </div>
-            </div>
-
-            <div className="surface-card-strong px-4 py-3 text-base">
-              <p className="text-slate-300">
-                Live: <span className="text-emerald-300">{remoteLiveLabel}</span>
-              </p>
-              <p className="text-slate-300 mt-2">
-                Confirmed letter:{" "}
-                <span className="text-emerald-400">{remoteConfirmedLetter || "-"}</span>
-              </p>
-              <p className="text-slate-300 mt-1">
-                Letters:{" "}
-                <span className="font-mono text-emerald-300">
-                  {remoteLetters.join(" ") || "-"}
-                </span>
-              </p>
-              <p className="text-slate-300 mt-1">
-                Phrase:{" "}
-                <span className="font-mono text-emerald-300">
-                  {remoteLetters.join("") || "-"}
-                </span>
-              </p>
-            </div>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (typeof handleSendChat === 'function') handleSendChat(e);
+                }} className="p-4 sm:p-5 bg-black/40 border-t border-white/5 backdrop-blur-md">
+                   <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        value={chatInput}
+                        onChange={e => setChatInput(e.target.value)}
+                        placeholder={roomJoined ? "Type your message..." : "Join a room to chat"}
+                        disabled={!roomJoined}
+                        className="w-full bg-slate-900/80 border border-white/10 rounded-full pl-5 pr-14 py-3.5 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-emerald-500/60 focus:ring-1 focus:ring-emerald-500/40 transition-all disabled:opacity-40 shadow-inner"
+                      />
+                      <button type="submit" disabled={!roomJoined || !chatInput.trim()} className="absolute right-2 w-10 h-10 flex items-center justify-center rounded-full bg-emerald-500 text-emerald-950 hover:bg-emerald-400 hover:scale-105 transition-all disabled:opacity-30 disabled:hover:scale-100 shadow-[0_4px_12px_rgba(52,211,153,0.3)] disabled:shadow-none">
+                         <svg className="w-4 h-4 translate-x-[1px] translate-y-[-1px]" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" /></svg>
+                      </button>
+                   </div>
+                </form>
+             </div>
           </div>
         </section>
 
         {/* Footer */}
-        <footer className="footer-min mt-4 pt-4 text-sm text-center">
+        <footer className="footer-min mt-2 pt-4 text-xs font-medium tracking-wider text-center opacity-60">
           GESTURA 2025
         </footer>
       </main>
+
     </div>
   );
 }

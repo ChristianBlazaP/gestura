@@ -6,21 +6,88 @@ import * as knnClassifier from '@tensorflow-models/knn-classifier';
 
 const classifier = knnClassifier.create();
 
+// Landmark connection pairs for palm visualization
+const HAND_CONNECTIONS = [
+  [0, 1], [1, 2], [2, 3], [3, 4],           // Thumb
+  [0, 5], [5, 6], [6, 7], [7, 8],           // Index
+  [0, 9], [9, 10], [10, 11], [11, 12],       // Middle
+  [0, 13], [13, 14], [14, 15], [15, 16],     // Ring
+  [0, 17], [17, 18], [18, 19], [19, 20],     // Pinky
+  [5, 9], [9, 13], [13, 17]                  // Palm base connections
+];
+
+// Landmark smoothing using exponential moving average
+class LandmarkSmoother {
+  constructor(alpha = 0.7) {
+    this.alpha = alpha;
+    this.prevLandmarks = null;
+  }
+
+  smooth(landmarks) {
+    if (!landmarks) return null;
+    
+    if (!this.prevLandmarks) {
+      this.prevLandmarks = landmarks.map(lm => ({ ...lm }));
+      return landmarks;
+    }
+
+    return landmarks.map((lm, i) => ({
+      x: this.alpha * lm.x + (1 - this.alpha) * this.prevLandmarks[i].x,
+      y: this.alpha * lm.y + (1 - this.alpha) * this.prevLandmarks[i].y,
+      z: this.alpha * (lm.z ?? 0) + (1 - this.alpha) * (this.prevLandmarks[i].z ?? 0),
+      visibility: lm.visibility ?? 0.5
+    }));
+  }
+}
+
 export default function WebcamInterpreter(props) {
   const { onSaveGesture, onPrediction } = props;
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const samplesRef = useRef([]);
+  const smootherRef = useRef(new LandmarkSmoother(0.7));
   const [label, setLabel] = useState('hello');
   const [isRecording, setIsRecording] = useState(false);
   const [prediction, setPrediction] = useState('—');
   const [isCameraReady, setIsCameraReady] = useState(false);
   const [lastSpoken, setLastSpoken] = useState(0);
+  const [detectionConfidence, setDetectionConfidence] = useState(0.85);
+
+  // Normalize landmarks to [-1, 1] range for better model accuracy
+  function normalizeLandmarks(landmarks) {
+    if (!landmarks || landmarks.length === 0) return null;
+    
+    // Calculate bounding box
+    let minX = Infinity, maxX = -Infinity;
+    let minY = Infinity, maxY = -Infinity;
+    
+    for (const lm of landmarks) {
+      minX = Math.min(minX, lm.x);
+      maxX = Math.max(maxX, lm.x);
+      minY = Math.min(minY, lm.y);
+      maxY = Math.max(maxY, lm.y);
+    }
+    
+    const rangeX = maxX - minX || 0.1;
+    const rangeY = maxY - minY || 0.1;
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+    
+    // Normalize to [-1, 1] range
+    return landmarks.map(lm => ({
+      x: ((lm.x - centerX) / (rangeX / 2)),
+      y: ((lm.y - centerY) / (rangeY / 2)),
+      z: (lm.z ?? 0) * 2, // Scale z-depth
+      visibility: lm.visibility ?? 0.5
+    }));
+  }
 
   function landmarksToArray(landmarks) {
     if (!landmarks) return null;
     const arr = [];
-    for (const lm of landmarks) arr.push(lm.x, lm.y, lm.z ?? 0);
+    for (const lm of landmarks) {
+      arr.push(lm.x, lm.y, lm.z ?? 0);
+    }
     return arr;
   }
 
@@ -32,8 +99,9 @@ export default function WebcamInterpreter(props) {
     hands.setOptions({
       maxNumHands: 1,
       modelComplexity: 1,
-      minDetectionConfidence: 0.7,
-      minTrackingConfidence: 0.6,
+      staticImageMode: false,
+      minDetectionConfidence: detectionConfidence,  // High confidence for accurate detection
+      minTrackingConfidence: 0.8,                    // High confidence for stable tracking
     });
 
     async function onResults(results) {
@@ -52,15 +120,38 @@ export default function WebcamInterpreter(props) {
       ctx.drawImage(v, 0, 0, ctx.canvas.width, ctx.canvas.height);
 
       if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        const lm = results.multiHandLandmarks[0];
-        ctx.fillStyle = 'rgba(0,150,130,0.95)';
-        for (const p of lm) {
+        let lm = results.multiHandLandmarks[0];
+        
+        // Apply smoothing to reduce jitter
+        lm = smootherRef.current.smooth(lm);
+        
+        // Normalize landmarks for better accuracy
+        const normalizedLm = normalizeLandmarks(lm);
+
+        // Draw landmark connections (palm structure)
+        ctx.strokeStyle = 'rgba(100,200,150,0.5)';
+        ctx.lineWidth = 2;
+        for (const [start, end] of HAND_CONNECTIONS) {
+          if (lm[start] && lm[end]) {
+            ctx.beginPath();
+            ctx.moveTo(lm[start].x * ctx.canvas.width, lm[start].y * ctx.canvas.height);
+            ctx.lineTo(lm[end].x * ctx.canvas.width, lm[end].y * ctx.canvas.height);
+            ctx.stroke();
+          }
+        }
+
+        // Draw landmarks as circles
+        ctx.fillStyle = 'rgba(0,200,150,0.95)';
+        for (let i = 0; i < lm.length; i++) {
+          const p = lm[i];
+          const size = i === 0 ? 8 : 6; // Palm center is slightly larger
           ctx.beginPath();
-          ctx.arc(p.x * ctx.canvas.width, p.y * ctx.canvas.height, 6, 0, 2 * Math.PI);
+          ctx.arc(p.x * ctx.canvas.width, p.y * ctx.canvas.height, size, 0, 2 * Math.PI);
           ctx.fill();
         }
 
-        const arr = landmarksToArray(lm);
+        // Use normalized landmarks for gesture recognition
+        const arr = landmarksToArray(normalizedLm);
         if (arr) {
           if (isRecording) samplesRef.current.push(arr);
 
@@ -115,7 +206,7 @@ export default function WebcamInterpreter(props) {
       hands.close();
       camera && camera.stop();
     };
-  }, [isRecording, lastSpoken, onPrediction]);
+  }, [isRecording, lastSpoken, onPrediction, detectionConfidence]);
 
   function addLocalExamples() {
     if (samplesRef.current.length === 0) {
@@ -160,6 +251,23 @@ export default function WebcamInterpreter(props) {
       <div className="bg-white rounded shadow p-4 w-full flex flex-col md:flex-row gap-4">
         <div className="flex-1">
           <h3 className="font-semibold mb-2">Interpreter</h3>
+          
+          <div className="mb-3 p-2 bg-blue-50 rounded">
+            <label className="block text-sm font-medium mb-2">Detection Confidence</label>
+            <input
+              type="range"
+              min="0.5"
+              max="0.95"
+              step="0.05"
+              value={detectionConfidence}
+              onChange={(e) => setDetectionConfidence(parseFloat(e.target.value))}
+              className="w-full"
+            />
+            <div className="text-xs text-gray-600 mt-1">
+              {(detectionConfidence * 100).toFixed(0)}% (Higher = More Accurate but Fewer Detections)
+            </div>
+          </div>
+
           <label className="block text-sm mb-1">Label</label>
           <input
             value={label}
